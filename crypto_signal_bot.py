@@ -38,7 +38,7 @@ SYMBOLS = [
     "ETH/USDT",
     "SOL/USDT",
     "SUI/USDT",
-    "HYPE/USDT",
+    "HYPE/USDT:USDT",
 ]
 
 TIMEFRAME   = "5m"    # таймфрейм: 1m, 5m, 15m, 1h, 4h, 1d

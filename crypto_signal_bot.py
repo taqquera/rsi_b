@@ -29,8 +29,8 @@ from datetime import datetime
 # НАЛАШТУВАННЯ — заповни свої дані тут
 # ============================================================
 
-TELEGRAM_TOKEN = "ВАШ_ТОКЕН_ВІД_BOTFATHER"
-CHAT_ID        = "ВАШ_CHAT_ID"
+TELEGRAM_TOKEN = "8886661285:AAF6p7w_BR4WIHo2oVrEhxi1pDqroXOilSA"
+CHAT_ID        = "-5103360859"
 
 # Список монет для сканування
 SYMBOLS = [

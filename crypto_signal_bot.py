@@ -35,9 +35,9 @@ CHAT_ID        = "ВАШ_CHAT_ID"
 # Список монет для сканування
 SYMBOLS = [
     "BTC/USDT:USDT",
-    "ETH/USDT:USDT",
-    "SOL/USDT:USDT",
-    "SUI/USDT:USDT",
+    "ETH/USDT",
+    "SOL/USDT",
+    "SUI/USDT",
     "HYPE/USDT:USDT",
 ]
 

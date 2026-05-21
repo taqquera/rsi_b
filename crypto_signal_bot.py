@@ -1,12 +1,12 @@
 """
 Крипто-сигнальний бот для Telegram
-Стратегія: RSI + EMA crossover + Тейк профіт / Стоп лос
+Стратегія: RSI + EMA crossover — мульти-монетний сканер
 Автор: твій фінансовий коуч (Claude)
 
 Що робить цей бот:
-- Кожні N хвилин перевіряє ціну на Binance
-- Розраховує RSI і EMA
-- Надсилає сигнал КУПУЙ/ПРОДАВАЙ з рівнями ТП і СЛ у Telegram
+- Кожні 15 хвилин сканує всі монети зі списку
+- Надсилає сигнал ТІЛЬКИ якщо є КУПУЙ або ПРОДАВАЙ
+- При НЕЙТРАЛЬНО — мовчить
 
 ВСТАНОВЛЕННЯ:
 pip install ccxt pandas python-telegram-bot schedule
@@ -29,26 +29,34 @@ from datetime import datetime
 # НАЛАШТУВАННЯ — заповни свої дані тут
 # ============================================================
 
-TELEGRAM_TOKEN = "8886661285:AAF6p7w_BR4WIHo2oVrEhxi1pDqroXOilSA"   # напр. "7123456789:AAF..."
-CHAT_ID        = "-5103360859"                # напр. "123456789"
+TELEGRAM_TOKEN = "ВАШ_ТОКЕН_ВІД_BOTFATHER"
+CHAT_ID        = "ВАШ_CHAT_ID"
 
-SYMBOL      = "SUI/USDT"   # яку монету відслідковувати
-TIMEFRAME   = "5m"         # таймфрейм: 1m, 5m, 15m, 1h, 4h, 1d
-CHECK_EVERY = 15           # перевіряти кожні N хвилин
+# Список монет для сканування
+SYMBOLS = [
+    "BTC/USDT",
+    "ETH/USDT",
+    "SOL/USDT",
+    "SUI/USDT",
+    "HYPE/USDT",
+]
+
+TIMEFRAME   = "5m"    # таймфрейм: 1m, 5m, 15m, 1h, 4h, 1d
+CHECK_EVERY = 15      # перевіряти кожні N хвилин
 
 # Параметри індикаторів
-RSI_PERIOD     = 14   # стандартний RSI
-RSI_OVERSOLD   = 30   # нижче = перепроданий (сигнал купити)
-RSI_OVERBOUGHT = 70   # вище = перекуплений (сигнал продати)
-EMA_FAST       = 9    # швидка EMA
-EMA_SLOW       = 21   # повільна EMA
+RSI_PERIOD     = 14
+RSI_OVERSOLD   = 30
+RSI_OVERBOUGHT = 70
+EMA_FAST       = 9
+EMA_SLOW       = 21
 
 # Параметри ризик-менеджменту
-STOP_LOSS_PCT   = 2.0   # стоп лос в % від ціни входу
-TAKE_PROFIT_PCT = 4.0   # тейк профіт в % (співвідношення ризик 1:2)
+STOP_LOSS_PCT   = 2.0
+TAKE_PROFIT_PCT = 4.0
 
 # ============================================================
-# ПІДКЛЮЧЕННЯ ДО BINANCE (без API ключів — тільки читання)
+# ПІДКЛЮЧЕННЯ ДО OKX
 # ============================================================
 
 exchange = ccxt.okx({
@@ -57,10 +65,6 @@ exchange = ccxt.okx({
 
 
 def get_candles(symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame:
-    """
-    Отримує останні свічки з Binance.
-    Повертає DataFrame: timestamp, open, high, low, close, volume
-    """
     raw = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
     df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
@@ -72,11 +76,6 @@ def get_candles(symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame:
 # ============================================================
 
 def calculate_rsi(closes: pd.Series, period: int = 14) -> pd.Series:
-    """
-    RSI — показує чи монета перекуплена/перепродана.
-    RSI < 30 = перепродана (можливо час купувати)
-    RSI > 70 = перекуплена (можливо час продавати)
-    """
     delta    = closes.diff()
     gain     = delta.clip(lower=0)
     loss     = (-delta).clip(lower=0)
@@ -87,18 +86,11 @@ def calculate_rsi(closes: pd.Series, period: int = 14) -> pd.Series:
 
 
 def calculate_ema(closes: pd.Series, period: int) -> pd.Series:
-    """
-    EMA — ковзне середнє.
-    Перетин EMA9 і EMA21 = сигнал зміни тренду.
-    """
     return closes.ewm(span=period, adjust=False).mean()
 
 
 def analyze(symbol: str, timeframe: str) -> dict:
-    """
-    Аналізує ринок і повертає сигнал з рівнями ТП/СЛ.
-    """
-    df = get_candles(symbol, timeframe)
+    df     = get_candles(symbol, timeframe)
     closes = df["close"]
 
     df["rsi"]      = calculate_rsi(closes, RSI_PERIOD)
@@ -115,7 +107,6 @@ def analyze(symbol: str, timeframe: str) -> dict:
     ema_fast_prev = prev["ema_fast"]
     ema_slow_prev = prev["ema_slow"]
 
-    # Визначаємо перетин EMA
     ema_crossed_up   = (ema_fast_prev < ema_slow_prev) and (ema_fast_now > ema_slow_now)
     ema_crossed_down = (ema_fast_prev > ema_slow_prev) and (ema_fast_now < ema_slow_now)
 
@@ -139,13 +130,10 @@ def analyze(symbol: str, timeframe: str) -> dict:
     elif sell_signals and not buy_signals:
         signal = "🔴 ПРОДАВАЙ"
 
-    # Розраховуємо тейк профіт і стоп лос
     if signal == "🟢 КУПУЙ":
-        # Лонг: ТП вище ціни, СЛ нижче
         take_profit = current_price * (1 + TAKE_PROFIT_PCT / 100)
         stop_loss   = current_price * (1 - STOP_LOSS_PCT / 100)
     elif signal == "🔴 ПРОДАВАЙ":
-        # Шорт: ТП нижче ціни, СЛ вище
         take_profit = current_price * (1 - TAKE_PROFIT_PCT / 100)
         stop_loss   = current_price * (1 + STOP_LOSS_PCT / 100)
     else:
@@ -168,33 +156,31 @@ def analyze(symbol: str, timeframe: str) -> dict:
 
 
 # ============================================================
-# ФОРМУВАННЯ І ВІДПРАВКА ПОВІДОМЛЕННЯ В TELEGRAM
+# ФОРМУВАННЯ ПОВІДОМЛЕННЯ
 # ============================================================
 
 def format_message(data: dict) -> str:
-    """Формує повідомлення для Telegram з рівнями ТП/СЛ."""
-    reasons_text = "\n".join(f"  • {r}" for r in data["reasons"]) if data["reasons"] else "  • Немає чітких сигналів"
+    reasons_text = "\n".join(f"  • {r}" for r in data["reasons"])
 
-    # Блок ТП/СЛ — показується тільки при сигналі КУПУЙ або ПРОДАВАЙ
     if data["take_profit"] and data["stop_loss"]:
         rr = TAKE_PROFIT_PCT / STOP_LOSS_PCT
         tp_sl_block = (
             f"━━━━━━━━━━━━━━━\n"
-            f"🎯 Тейк профіт: *${data['take_profit']:,.2f}* (+{TAKE_PROFIT_PCT}%)\n"
-            f"🛑 Стоп лос:    *${data['stop_loss']:,.2f}* (-{STOP_LOSS_PCT}%)\n"
+            f"🎯 Тейк профіт: *${data['take_profit']:,.4f}* (+{TAKE_PROFIT_PCT}%)\n"
+            f"🛑 Стоп лос:    *${data['stop_loss']:,.4f}* (-{STOP_LOSS_PCT}%)\n"
             f"📊 Ризик/прибуток: 1:{rr:.0f}\n"
         )
     else:
         tp_sl_block = ""
 
-    msg = (
+    return (
         f"📊 *{data['symbol']}* | {data['timeframe']}\n"
         f"🕐 {data['timestamp'].strftime('%H:%M %d.%m.%Y')}\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"💰 Ціна входу: *${data['price']:,.2f}*\n"
+        f"💰 Ціна входу: *${data['price']:,.4f}*\n"
         f"📈 RSI ({RSI_PERIOD}): `{data['rsi']:.1f}`\n"
-        f"〽️ EMA{EMA_FAST}: `{data['ema_fast']:,.2f}`\n"
-        f"〽️ EMA{EMA_SLOW}: `{data['ema_slow']:,.2f}`\n"
+        f"〽️ EMA{EMA_FAST}: `{data['ema_fast']:,.4f}`\n"
+        f"〽️ EMA{EMA_SLOW}: `{data['ema_slow']:,.4f}`\n"
         f"━━━━━━━━━━━━━━━\n"
         f"Сигнал: *{data['signal']}*\n"
         f"Причини:\n{reasons_text}\n"
@@ -202,55 +188,55 @@ def format_message(data: dict) -> str:
         f"━━━━━━━━━━━━━━━\n"
         f"⚠️ _Це не фінансова порада. Завжди аналізуй самостійно._"
     )
-    return msg
 
 
 async def send_telegram(message: str) -> None:
-    """Надсилає повідомлення в Telegram."""
     bot = Bot(token=TELEGRAM_TOKEN)
-    await bot.send_message(
-        chat_id=CHAT_ID,
-        text=message,
-        parse_mode="Markdown"
-    )
+    await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode="Markdown")
 
 
 # ============================================================
-# ГОЛОВНИЙ ЦИКЛ
+# ГОЛОВНИЙ ЦИКЛ — сканує всі монети
 # ============================================================
 
-def check_and_notify() -> None:
-    """Запускається за розкладом — аналізує і надсилає сигнал."""
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Перевіряю {SYMBOL}...")
+def scan_all() -> None:
+    now = datetime.now().strftime("%H:%M:%S")
+    print(f"\n[{now}] Сканую {len(SYMBOLS)} монет...")
 
-    try:
-        data    = analyze(SYMBOL, TIMEFRAME)
-        message = format_message(data)
+    signals_found = 0
 
-        print(f"  Ціна: ${data['price']:,.2f} | RSI: {data['rsi']:.1f} | Сигнал: {data['signal']}")
-        if data["take_profit"]:
-            print(f"  ТП: ${data['take_profit']:,.2f} | СЛ: ${data['stop_loss']:,.2f}")
+    for symbol in SYMBOLS:
+        try:
+            data = analyze(symbol, TIMEFRAME)
+            print(f"  {symbol}: ${data['price']:,.4f} | RSI: {data['rsi']:.1f} | {data['signal']}")
 
-        asyncio.run(send_telegram(message))
-        print("  ✅ Повідомлення надіслано в Telegram")
+            # Надсилаємо ТІЛЬКИ при реальному сигналі
+            if data["signal"] != "НЕЙТРАЛЬНО":
+                message = format_message(data)
+                asyncio.run(send_telegram(message))
+                print(f"  ✅ Сигнал надіслано для {symbol}")
+                signals_found += 1
 
-    except Exception as e:
-        print(f"  ❌ Помилка: {e}")
+        except Exception as e:
+            print(f"  ❌ {symbol}: Помилка — {e}")
+
+    if signals_found == 0:
+        print(f"  — Всі монети нейтральні, мовчимо")
 
 
 def main():
     print("=" * 50)
-    print("🤖 Крипто-сигнальний бот запущено")
-    print(f"   Монета:      {SYMBOL}")
+    print("🤖 Мульти-монетний сканер запущено")
+    print(f"   Монети:      {', '.join(SYMBOLS)}")
     print(f"   Таймфрейм:   {TIMEFRAME}")
     print(f"   Перевірка:   кожні {CHECK_EVERY} хв")
     print(f"   Стоп лос:    {STOP_LOSS_PCT}%")
     print(f"   Тейк профіт: {TAKE_PROFIT_PCT}%")
     print("=" * 50)
 
-    check_and_notify()
+    scan_all()
 
-    schedule.every(CHECK_EVERY).minutes.do(check_and_notify)
+    schedule.every(CHECK_EVERY).minutes.do(scan_all)
 
     while True:
         schedule.run_pending()

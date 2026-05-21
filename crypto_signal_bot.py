@@ -51,7 +51,7 @@ TAKE_PROFIT_PCT = 4.0   # тейк профіт в % (співвідношенн
 # ПІДКЛЮЧЕННЯ ДО BINANCE (без API ключів — тільки читання)
 # ============================================================
 
-exchange = ccxt.binance({
+exchange = ccxt.okx({
     "enableRateLimit": True,
 })
 

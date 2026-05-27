@@ -129,6 +129,14 @@ def analyze(symbol_name: str, ticker: str) -> dict:
     prev_1  = df.iloc[-2]   # 1 свічка тому (15 хвилин)
     prev_4  = df.iloc[-5]   # 4 свічки тому (1 година)
 
+    # Перевірка свіжості даних — якщо старіша ніж 2 години, пропускаємо
+    last_ts = last["timestamp"]
+    if hasattr(last_ts, "tzinfo") and last_ts.tzinfo is not None:
+        last_ts = last_ts.replace(tzinfo=None)
+    data_age_minutes = (datetime.utcnow() - last_ts).total_seconds() / 60
+    if data_age_minutes > 120:
+        raise ValueError(f"Застарілі дані — остання свічка {data_age_minutes:.0f} хв тому")
+
     current_price   = float(last["close"])
     price_1ago      = float(prev_1["close"])
     price_4ago      = float(prev_4["close"])

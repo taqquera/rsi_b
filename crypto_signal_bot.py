@@ -36,7 +36,7 @@ SYMBOLS = {
 }
 
 TIMEFRAME   = "1h"
-CHECK_EVERY = 60
+CHECK_EVERY = 15
 
 # Параметри RSI
 RSI_PERIOD     = 14

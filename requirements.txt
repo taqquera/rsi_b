@@ -1,4 +1,5 @@
-ccxt
 pandas
 python-telegram-bot
 schedule
+yfinance
+requests

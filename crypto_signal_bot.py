@@ -19,7 +19,7 @@ import time
 import asyncio
 import yfinance as yf
 from telegram import Bot
-from datetime import datetime
+from datetime import datetime, timezone
 
 # ============================================================
 # НАЛАШТУВАННЯ
@@ -133,8 +133,11 @@ def analyze(symbol_name: str, ticker: str) -> dict:
     last_ts = last["timestamp"]
     if hasattr(last_ts, "tzinfo") and last_ts.tzinfo is not None:
         last_ts = last_ts.replace(tzinfo=None)
-    data_age_minutes = (datetime.utcnow() - last_ts).total_seconds() / 60
-    if data_age_minutes > 120:
+    from datetime import timezone
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    data_age_minutes = (now_utc - last_ts).total_seconds() / 60
+    max_age = 300 if symbol_name == "XAU/USD" else 120
+    if data_age_minutes > max_age:
         raise ValueError(f"Застарілі дані — остання свічка {data_age_minutes:.0f} хв тому")
 
     current_price   = float(last["close"])

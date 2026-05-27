@@ -1,6 +1,6 @@
 """
-Форекс сигнальний бот для Telegram v4.1
-Стратегія: RSI + сповіщення про різкі рухи
+Форекс сигнальний бот для Telegram v4.2
+Стратегія: RSI + сповіщення про різкі рухи (за 1 свічку І за 4 свічки)
 Пари: EUR/USD, GBP/USD, USD/JPY, XAU/USD
 Автор: твій фінансовий коуч (Claude)
 
@@ -25,7 +25,7 @@ from datetime import datetime
 # НАЛАШТУВАННЯ
 # ============================================================
 
-TELEGRAM_TOKEN = "В8886661285:AAF6p7w_BR4WIHo2oVrEhxi1pDqroXOilSA"
+TELEGRAM_TOKEN = "8886661285:AAF6p7w_BR4WIHo2oVrEhxi1pDqroXOilSA"
 CHAT_ID        = "-5103360859"
 
 SYMBOLS = {
@@ -50,13 +50,21 @@ ATR_PERIOD  = 14
 ATR_TP_MULT = 2.0
 ATR_SL_MULT = 1.0
 
-# Поріг різкого руху за одну свічку (%)
-# Форекс: 0.5% вже великий рух. Золото: 1.0%
-SPIKE_THRESHOLDS = {
+# Пороги різкого руху
+# За 1 свічку (15 хвилин)
+SPIKE_1_CANDLE = {
+    "EUR/USD": 0.3,
+    "GBP/USD": 0.3,
+    "USD/JPY": 0.3,
+    "XAU/USD": 0.5,
+}
+
+# За 4 свічки (1 година) — ловить поступові рухи
+SPIKE_4_CANDLES = {
     "EUR/USD": 0.5,
     "GBP/USD": 0.5,
     "USD/JPY": 0.5,
-    "XAU/USD": 1.0,  # золото рухається більше
+    "XAU/USD": 1.0,
 }
 
 # ============================================================
@@ -71,7 +79,7 @@ last_spike_signal = {symbol: None for symbol in SYMBOLS.keys()}
 # ============================================================
 
 def get_candles(symbol_name: str, ticker: str) -> pd.DataFrame:
-    data = yf.download(ticker, period="7d", interval="1h", progress=False)
+    data = yf.download(ticker, period="5d", interval="15m", progress=False)
     if data.empty:
         raise ValueError(f"Немає даних для {symbol_name}")
     df = data[["Open", "High", "Low", "Close", "Volume"]].copy()
@@ -117,15 +125,21 @@ def analyze(symbol_name: str, ticker: str) -> dict:
     df["rsi"] = calculate_rsi(closes, RSI_PERIOD)
     df["atr"] = calculate_atr(df, ATR_PERIOD)
 
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
+    last    = df.iloc[-1]
+    prev_1  = df.iloc[-2]   # 1 свічка тому (15 хвилин)
+    prev_4  = df.iloc[-5]   # 4 свічки тому (1 година)
 
-    current_price    = float(last["close"])
-    prev_price       = float(prev["close"])
-    current_rsi      = float(last["rsi"])
-    current_atr      = float(last["atr"])
-    atr_pct          = (current_atr / current_price) * 100
-    price_change_pct = ((current_price - prev_price) / prev_price) * 100
+    current_price   = float(last["close"])
+    price_1ago      = float(prev_1["close"])
+    price_4ago      = float(prev_4["close"])
+    current_rsi     = float(last["rsi"])
+    current_atr     = float(last["atr"])
+    atr_pct         = (current_atr / current_price) * 100
+
+    # Рух за 1 свічку (15 хв)
+    change_1c = ((current_price - price_1ago) / price_1ago) * 100
+    # Рух за 4 свічки (1 година)
+    change_4c = ((current_price - price_4ago) / price_4ago) * 100
 
     # RSI сигнал
     signal = "НЕЙТРАЛЬНО"
@@ -139,12 +153,23 @@ def analyze(symbol_name: str, ticker: str) -> dict:
         reason.append(f"RSI перекуплений ({current_rsi:.1f} > {RSI_OVERBOUGHT})")
 
     # Сповіщення про різкий рух
-    spike_threshold = SPIKE_THRESHOLDS.get(symbol_name, 0.5)
     spike_signal = None
-    if price_change_pct <= -spike_threshold:
-        spike_signal = "📉 РІЗКЕ ПАДІННЯ"
-    elif price_change_pct >= spike_threshold:
-        spike_signal = "📈 РІЗКЕ ЗРОСТАННЯ"
+    spike_period = None
+    spike_change = None
+
+    thr_1 = SPIKE_1_CANDLE.get(symbol_name, 0.3)
+    thr_4 = SPIKE_4_CANDLES.get(symbol_name, 1.0)
+
+    if abs(change_4c) >= thr_4:
+        # Пріоритет — рух за годину
+        spike_change = change_4c
+        spike_period = "1 год"
+        spike_signal = "📉 РІЗКЕ ПАДІННЯ" if change_4c < 0 else "📈 РІЗКЕ ЗРОСТАННЯ"
+    elif abs(change_1c) >= thr_1:
+        # Рух за 15 хвилин
+        spike_change = change_1c
+        spike_period = "15 хв"
+        spike_signal = "📉 РІЗКЕ ПАДІННЯ" if change_1c < 0 else "📈 РІЗКЕ ЗРОСТАННЯ"
 
     # TP/SL
     if signal == "🟢 КУПУЙ":
@@ -161,21 +186,25 @@ def analyze(symbol_name: str, ticker: str) -> dict:
     sl_pct = ((stop_loss  - current_price) / current_price * 100) if stop_loss  else None
 
     return {
-        "symbol":           symbol_name,
-        "price":            current_price,
-        "prev_price":       prev_price,
-        "price_change_pct": price_change_pct,
-        "rsi":              current_rsi,
-        "atr":              current_atr,
-        "atr_pct":          atr_pct,
-        "signal":           signal,
-        "spike_signal":     spike_signal,
-        "reasons":          reason,
-        "take_profit":      take_profit,
-        "stop_loss":        stop_loss,
-        "tp_pct":           tp_pct,
-        "sl_pct":           sl_pct,
-        "timestamp":        last["timestamp"],
+        "symbol":        symbol_name,
+        "price":         current_price,
+        "price_1ago":    price_1ago,
+        "price_4ago":    price_4ago,
+        "change_1c":     change_1c,
+        "change_4c":     change_4c,
+        "rsi":           current_rsi,
+        "atr":           current_atr,
+        "atr_pct":       atr_pct,
+        "signal":        signal,
+        "spike_signal":  spike_signal,
+        "spike_period":  spike_period,
+        "spike_change":  spike_change,
+        "reasons":       reason,
+        "take_profit":   take_profit,
+        "stop_loss":     stop_loss,
+        "tp_pct":        tp_pct,
+        "sl_pct":        sl_pct,
+        "timestamp":     last["timestamp"],
     }
 
 
@@ -202,7 +231,6 @@ def should_send(symbol: str, new_signal: str, current_rsi: float) -> bool:
 
 
 def should_send_spike(symbol: str, spike_signal: str) -> bool:
-    """Надсилає сповіщення про різкий рух тільки один раз підряд."""
     global last_spike_signal
 
     if spike_signal is None:
@@ -231,10 +259,12 @@ def format_price(symbol: str, price: float) -> str:
 
 def format_message(data: dict) -> str:
     p = format_price(data["symbol"], data["price"])
+    reasons_text = "\n".join(f"  • {r}" for r in data["reasons"])
+    time_str = data["timestamp"].strftime("%H:%M %d.%m.%Y") if hasattr(data["timestamp"], "strftime") else str(data["timestamp"])
 
     if data["take_profit"]:
-        tp = format_price(data["symbol"], data["take_profit"])
-        sl = format_price(data["symbol"], data["stop_loss"])
+        tp  = format_price(data["symbol"], data["take_profit"])
+        sl  = format_price(data["symbol"], data["stop_loss"])
         atr = format_price(data["symbol"], data["atr"])
         tp_sl_block = (
             f"━━━━━━━━━━━━━━━\n"
@@ -245,9 +275,6 @@ def format_message(data: dict) -> str:
         )
     else:
         tp_sl_block = ""
-
-    reasons_text = "\n".join(f"  • {r}" for r in data["reasons"])
-    time_str = data["timestamp"].strftime("%H:%M %d.%m.%Y") if hasattr(data["timestamp"], "strftime") else str(data["timestamp"])
 
     return (
         f"📊 *{data['symbol']}* | {TIMEFRAME}\n"
@@ -265,20 +292,18 @@ def format_message(data: dict) -> str:
 
 
 def format_spike_message(data: dict) -> str:
-    """Окреме повідомлення про різкий рух."""
     p     = format_price(data["symbol"], data["price"])
-    p_prev = format_price(data["symbol"], data["prev_price"])
-    direction = "⬇️" if data["price_change_pct"] < 0 else "⬆️"
-    spike_threshold = SPIKE_THRESHOLDS.get(data["symbol"], 0.5)
+    p_ref = format_price(data["symbol"], data["price_4ago"] if data["spike_period"] == "1 год" else data["price_1ago"])
+    direction = "⬇️" if data["spike_change"] < 0 else "⬆️"
     time_str = data["timestamp"].strftime("%H:%M %d.%m.%Y") if hasattr(data["timestamp"], "strftime") else str(data["timestamp"])
 
     return (
         f"⚡ *{data['symbol']}* — {data['spike_signal']}\n"
         f"🕐 {time_str}\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"💰 Ціна зараз: *{p}*\n"
-        f"💰 Попередня:  *{p_prev}*\n"
-        f"{direction} Рух за 1 свічку: *{data['price_change_pct']:+.3f}%* (поріг {spike_threshold}%)\n"
+        f"💰 Ціна зараз:  *{p}*\n"
+        f"💰 Була ({data['spike_period']} тому): *{p_ref}*\n"
+        f"{direction} Рух: *{data['spike_change']:+.3f}%* за {data['spike_period']}\n"
         f"📈 RSI: `{data['rsi']:.1f}`\n"
         f"━━━━━━━━━━━━━━━\n"
         f"⚠️ _Можливий вплив новин. Аналізуй самостійно._"
@@ -303,22 +328,22 @@ def scan_all() -> None:
     for symbol_name, ticker in SYMBOLS.items():
         try:
             data = analyze(symbol_name, ticker)
-            print(f"  {symbol_name}: {data['price']:.5f} | RSI: {data['rsi']:.1f} | {data['price_change_pct']:+.3f}% | {data['signal']}")
+            print(f"  {symbol_name}: {data['price']:.4f} | RSI: {data['rsi']:.1f} | 15хв: {data['change_1c']:+.3f}% | 1год: {data['change_4c']:+.3f}% | {data['signal']}")
 
             # RSI сигнал
             if should_send(symbol_name, data["signal"], data["rsi"]):
-                message = format_message(data)
-                asyncio.run(send_telegram(message))
+                asyncio.run(send_telegram(format_message(data)))
                 last_signal[symbol_name] = data["signal"]
                 print(f"  ✅ RSI сигнал: {data['signal']}")
                 signals_sent += 1
 
-            # Сповіщення про різкий рух
+            # Різкий рух
             if data["spike_signal"] and should_send_spike(symbol_name, data["spike_signal"]):
-                spike_msg = format_spike_message(data)
-                asyncio.run(send_telegram(spike_msg))
-                print(f"  ⚡ Різкий рух: {data['spike_signal']} ({data['price_change_pct']:+.3f}%)")
+                asyncio.run(send_telegram(format_spike_message(data)))
+                print(f"  ⚡ {data['spike_signal']} за {data['spike_period']}: {data['spike_change']:+.3f}%")
                 signals_sent += 1
+            elif not data["spike_signal"]:
+                last_spike_signal[symbol_name] = None
 
         except Exception as e:
             print(f"  ❌ {symbol_name}: Помилка — {e}")
@@ -329,11 +354,11 @@ def scan_all() -> None:
 
 def main():
     print("=" * 55)
-    print("🤖 Форекс сигнальний бот v4.1 запущено")
+    print("🤖 Форекс сигнальний бот v4.2 запущено")
     print(f"   Пари:         {', '.join(SYMBOLS.keys())}")
     print(f"   Таймфрейм:    {TIMEFRAME}")
     print(f"   Перевірка:    кожні {CHECK_EVERY} хв")
-    print(f"   Різкий рух:   EUR/GBP/JPY >{list(SPIKE_THRESHOLDS.values())[0]}% | XAU >{list(SPIKE_THRESHOLDS.values())[3]}%")
+    print(f"   Різкий рух:   15хв >0.3%/0.5% | 1год >0.5%/1.0%")
     print("=" * 55)
 
     scan_all()

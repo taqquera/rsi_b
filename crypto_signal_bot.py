@@ -35,7 +35,7 @@ SYMBOLS = {
     "XAU/USD": "GC=F",
 }
 
-TIMEFRAME   = "1h"
+TIMEFRAME   = "15m"
 CHECK_EVERY = 15
 
 # Параметри RSI

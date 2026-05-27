@@ -1,11 +1,15 @@
 """
-Форекс сигнальний бот для Telegram v4.2
-Стратегія: RSI + сповіщення про різкі рухи (за 1 свічку І за 4 свічки)
-Пари: EUR/USD, GBP/USD, USD/JPY, XAU/USD
+Крипто-сигнальний бот для Telegram v3.0
+Стратегія: тільки RSI + пам'ять сигналів (без дублікатів)
 Автор: твій фінансовий коуч (Claude)
 
+Зміни v3.0:
+- Прибрано EMA crossover (давав забагато шуму)
+- Додано пам'ять: кожна монета надсилає сигнал тільки 1 раз
+- Повторний сигнал тільки коли RSI вийшов з зони і повернувся знову
+
 ВСТАНОВЛЕННЯ:
-pip install pandas python-telegram-bot schedule yfinance requests
+pip install ccxt pandas python-telegram-bot schedule
 
 НАЛАШТУВАННЯ:
 1. Створи бота через @BotFather -> отримай TELEGRAM_TOKEN
@@ -13,85 +17,65 @@ pip install pandas python-telegram-bot schedule yfinance requests
 3. Заповни змінні нижче
 """
 
+import ccxt
 import pandas as pd
 import schedule
 import time
 import asyncio
-import yfinance as yf
 from telegram import Bot
-from datetime import datetime, timezone
+from datetime import datetime
 
 # ============================================================
-# НАЛАШТУВАННЯ
+# НАЛАШТУВАННЯ — заповни свої дані тут
 # ============================================================
 
 TELEGRAM_TOKEN = "8886661285:AAF6p7w_BR4WIHo2oVrEhxi1pDqroXOilSA"
 CHAT_ID        = "-5103360859"
 
-SYMBOLS = {
-    "EUR/USD": "EURUSD=X",
-    "GBP/USD": "GBPUSD=X",
-    "USD/JPY": "USDJPY=X",
-    "XAU/USD": "GC=F",
-}
+SYMBOLS = [
+    "BTC/USDT",
+    "ETH/USDT",
+    "SOL/USDT",
+    "DOT/USDT",
+    "AVAX/USDT",
+]
 
-TIMEFRAME   = "15m"
+TIMEFRAME   = "1h"
 CHECK_EVERY = 15
 
 # Параметри RSI
 RSI_PERIOD     = 14
-RSI_OVERSOLD   = 30
-RSI_OVERBOUGHT = 70
-RSI_RESET_LOW  = 40
-RSI_RESET_HIGH = 60
+RSI_OVERSOLD   = 30   # сигнал КУПУЙ
+RSI_OVERBOUGHT = 70   # сигнал ПРОДАВАЙ
+RSI_RESET_LOW  = 40   # RSI має піднятись вище 40 щоб скинути сигнал КУПУЙ
+RSI_RESET_HIGH = 60   # RSI має впасти нижче 60 щоб скинути сигнал ПРОДАВАЙ
 
 # Параметри ATR
 ATR_PERIOD  = 14
 ATR_TP_MULT = 2.0
 ATR_SL_MULT = 1.0
 
-# Пороги різкого руху
-# За 1 свічку (15 хвилин)
-SPIKE_1_CANDLE = {
-    "EUR/USD": 0.3,
-    "GBP/USD": 0.3,
-    "USD/JPY": 0.3,
-    "XAU/USD": 0.5,
-}
-
-# За 4 свічки (1 година) — ловить поступові рухи
-SPIKE_4_CANDLES = {
-    "EUR/USD": 0.5,
-    "GBP/USD": 0.5,
-    "USD/JPY": 0.5,
-    "XAU/USD": 1.0,
-}
+# ============================================================
+# ПАМ'ЯТЬ СИГНАЛІВ — зберігає останній сигнал для кожної монети
+# Формат: { "BTC/USDT:USDT": "🟢 КУПУЙ" або "🔴 ПРОДАВАЙ" або None }
+# ============================================================
+last_signal = {symbol: None for symbol in SYMBOLS}
 
 # ============================================================
-# ПАМ'ЯТЬ СИГНАЛІВ
-# ============================================================
-last_signal       = {symbol: None for symbol in SYMBOLS.keys()}
-last_spike_signal = {symbol: None for symbol in SYMBOLS.keys()}
-
-
-# ============================================================
-# ОТРИМАННЯ ДАНИХ
+# ПІДКЛЮЧЕННЯ ДО OKX
 # ============================================================
 
-def get_candles(symbol_name: str, ticker: str) -> pd.DataFrame:
-    data = yf.download(ticker, period="5d", interval="15m", progress=False)
-    if data.empty:
-        raise ValueError(f"Немає даних для {symbol_name}")
-    df = data[["Open", "High", "Low", "Close", "Volume"]].copy()
-    df.columns = ["open", "high", "low", "close", "volume"]
-    df.index.name = "timestamp"
-    df = df.reset_index()
+exchange = ccxt.okx({
+    "enableRateLimit": True,
+})
+
+
+def get_candles(symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame:
+    raw = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+    df  = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
     return df
 
-
-# ============================================================
-# ІНДИКАТОРИ
-# ============================================================
 
 def calculate_rsi(closes: pd.Series, period: int = 14) -> pd.Series:
     delta    = closes.diff()
@@ -114,45 +98,21 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     return true_range.ewm(com=period - 1, min_periods=period).mean()
 
 
-# ============================================================
-# АНАЛІЗ
-# ============================================================
-
-def analyze(symbol_name: str, ticker: str) -> dict:
-    df     = get_candles(symbol_name, ticker)
+def analyze(symbol: str, timeframe: str) -> dict:
+    df     = get_candles(symbol, timeframe)
     closes = df["close"]
 
     df["rsi"] = calculate_rsi(closes, RSI_PERIOD)
     df["atr"] = calculate_atr(df, ATR_PERIOD)
 
-    last    = df.iloc[-1]
-    prev_1  = df.iloc[-2]   # 1 свічка тому (15 хвилин)
-    prev_4  = df.iloc[-5]   # 4 свічки тому (1 година)
+    last = df.iloc[-1]
 
-    # Перевірка свіжості даних — якщо старіша ніж 2 години, пропускаємо
-    last_ts = last["timestamp"]
-    if hasattr(last_ts, "tzinfo") and last_ts.tzinfo is not None:
-        last_ts = last_ts.replace(tzinfo=None)
-    from datetime import timezone
-    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-    data_age_minutes = (now_utc - last_ts).total_seconds() / 60
-    max_age = 300 if symbol_name == "XAU/USD" else 120
-    if data_age_minutes > max_age:
-        raise ValueError(f"Застарілі дані — остання свічка {data_age_minutes:.0f} хв тому")
+    current_price = last["close"]
+    current_rsi   = last["rsi"]
+    current_atr   = last["atr"]
+    atr_pct       = (current_atr / current_price) * 100
 
-    current_price   = float(last["close"])
-    price_1ago      = float(prev_1["close"])
-    price_4ago      = float(prev_4["close"])
-    current_rsi     = float(last["rsi"])
-    current_atr     = float(last["atr"])
-    atr_pct         = (current_atr / current_price) * 100
-
-    # Рух за 1 свічку (15 хв)
-    change_1c = ((current_price - price_1ago) / price_1ago) * 100
-    # Рух за 4 свічки (1 година)
-    change_4c = ((current_price - price_4ago) / price_4ago) * 100
-
-    # RSI сигнал
+    # Тільки RSI сигнали — без EMA
     signal = "НЕЙТРАЛЬНО"
     reason = []
 
@@ -163,26 +123,7 @@ def analyze(symbol_name: str, ticker: str) -> dict:
         signal = "🔴 ПРОДАВАЙ"
         reason.append(f"RSI перекуплений ({current_rsi:.1f} > {RSI_OVERBOUGHT})")
 
-    # Сповіщення про різкий рух
-    spike_signal = None
-    spike_period = None
-    spike_change = None
-
-    thr_1 = SPIKE_1_CANDLE.get(symbol_name, 0.3)
-    thr_4 = SPIKE_4_CANDLES.get(symbol_name, 1.0)
-
-    if abs(change_4c) >= thr_4:
-        # Пріоритет — рух за годину
-        spike_change = change_4c
-        spike_period = "1 год"
-        spike_signal = "📉 РІЗКЕ ПАДІННЯ" if change_4c < 0 else "📈 РІЗКЕ ЗРОСТАННЯ"
-    elif abs(change_1c) >= thr_1:
-        # Рух за 15 хвилин
-        spike_change = change_1c
-        spike_period = "15 хв"
-        spike_signal = "📉 РІЗКЕ ПАДІННЯ" if change_1c < 0 else "📈 РІЗКЕ ЗРОСТАННЯ"
-
-    # TP/SL
+    # TP/SL через ATR
     if signal == "🟢 КУПУЙ":
         take_profit = current_price + (current_atr * ATR_TP_MULT)
         stop_loss   = current_price - (current_atr * ATR_SL_MULT)
@@ -197,33 +138,32 @@ def analyze(symbol_name: str, ticker: str) -> dict:
     sl_pct = ((stop_loss  - current_price) / current_price * 100) if stop_loss  else None
 
     return {
-        "symbol":        symbol_name,
-        "price":         current_price,
-        "price_1ago":    price_1ago,
-        "price_4ago":    price_4ago,
-        "change_1c":     change_1c,
-        "change_4c":     change_4c,
-        "rsi":           current_rsi,
-        "atr":           current_atr,
-        "atr_pct":       atr_pct,
-        "signal":        signal,
-        "spike_signal":  spike_signal,
-        "spike_period":  spike_period,
-        "spike_change":  spike_change,
-        "reasons":       reason,
-        "take_profit":   take_profit,
-        "stop_loss":     stop_loss,
-        "tp_pct":        tp_pct,
-        "sl_pct":        sl_pct,
-        "timestamp":     last["timestamp"],
+        "symbol":      symbol,
+        "timeframe":   timeframe,
+        "price":       current_price,
+        "rsi":         current_rsi,
+        "atr":         current_atr,
+        "atr_pct":     atr_pct,
+        "signal":      signal,
+        "reasons":     reason,
+        "take_profit": take_profit,
+        "stop_loss":   stop_loss,
+        "tp_pct":      tp_pct,
+        "sl_pct":      sl_pct,
+        "timestamp":   last["timestamp"],
     }
 
 
-# ============================================================
-# ПАМ'ЯТЬ
-# ============================================================
-
 def should_send(symbol: str, new_signal: str, current_rsi: float) -> bool:
+    """
+    Перевіряє чи треба надсилати сигнал.
+
+    Логіка пам'яті:
+    - Якщо сигнал НЕЙТРАЛЬНО — не надсилаємо
+    - Якщо такий самий сигнал вже був надісланий — не надсилаємо
+    - Якщо попередній сигнал був КУПУЙ і RSI піднявся вище RSI_RESET_LOW — скидаємо пам'ять
+    - Якщо попередній сигнал був ПРОДАВАЙ і RSI впав нижче RSI_RESET_HIGH — скидаємо пам'ять
+    """
     global last_signal
 
     if new_signal == "НЕЙТРАЛЬНО":
@@ -231,93 +171,58 @@ def should_send(symbol: str, new_signal: str, current_rsi: float) -> bool:
 
     prev = last_signal[symbol]
 
+    # Скидаємо пам'ять якщо RSI вийшов з зони
     if prev == "🟢 КУПУЙ" and current_rsi > RSI_RESET_LOW:
         last_signal[symbol] = None
         prev = None
+        print(f"  🔄 {symbol}: сигнал КУПУЙ скинуто (RSI вийшов з зони: {current_rsi:.1f})")
+
     if prev == "🔴 ПРОДАВАЙ" and current_rsi < RSI_RESET_HIGH:
         last_signal[symbol] = None
         prev = None
+        print(f"  🔄 {symbol}: сигнал ПРОДАВАЙ скинуто (RSI вийшов з зони: {current_rsi:.1f})")
 
-    return prev != new_signal
-
-
-def should_send_spike(symbol: str, spike_signal: str) -> bool:
-    global last_spike_signal
-
-    if spike_signal is None:
-        last_spike_signal[symbol] = None
+    # Надсилаємо тільки якщо сигнал новий
+    if prev == new_signal:
         return False
 
-    if last_spike_signal[symbol] == spike_signal:
-        return False
-
-    last_spike_signal[symbol] = spike_signal
     return True
 
 
-# ============================================================
-# ПОВІДОМЛЕННЯ
-# ============================================================
-
-def format_price(symbol: str, price: float) -> str:
-    if symbol == "USD/JPY":
-        return f"{price:.3f}"
-    elif symbol == "XAU/USD":
-        return f"${price:,.2f}"
-    else:
-        return f"{price:.5f}"
-
-
 def format_message(data: dict) -> str:
-    p = format_price(data["symbol"], data["price"])
-    reasons_text = "\n".join(f"  • {r}" for r in data["reasons"])
-    time_str = data["timestamp"].strftime("%H:%M %d.%m.%Y") if hasattr(data["timestamp"], "strftime") else str(data["timestamp"])
-
-    if data["take_profit"]:
-        tp  = format_price(data["symbol"], data["take_profit"])
-        sl  = format_price(data["symbol"], data["stop_loss"])
-        atr = format_price(data["symbol"], data["atr"])
-        tp_sl_block = (
-            f"━━━━━━━━━━━━━━━\n"
-            f"📐 ATR: `{atr}` ({data['atr_pct']:.3f}%)\n"
-            f"🎯 Тейк профіт: *{tp}* ({data['tp_pct']:+.3f}%)\n"
-            f"🛑 Стоп лос:    *{sl}* ({data['sl_pct']:+.3f}%)\n"
-            f"📊 Ризик/прибуток: 1:{ATR_TP_MULT/ATR_SL_MULT:.0f}\n"
-        )
+    if data["price"] > 100:
+        price_fmt = f"${data['price']:,.2f}"
+        tp_fmt    = f"${data['take_profit']:,.2f}"
+        sl_fmt    = f"${data['stop_loss']:,.2f}"
+        atr_fmt   = f"${data['atr']:,.2f}"
     else:
-        tp_sl_block = ""
+        price_fmt = f"${data['price']:,.4f}"
+        tp_fmt    = f"${data['take_profit']:,.4f}"
+        sl_fmt    = f"${data['stop_loss']:,.4f}"
+        atr_fmt   = f"${data['atr']:,.4f}"
+
+    reasons_text = "\n".join(f"  • {r}" for r in data["reasons"])
+
+    tp_sl_block = (
+        f"━━━━━━━━━━━━━━━\n"
+        f"📐 ATR: `{atr_fmt}` ({data['atr_pct']:.2f}% волатильність)\n"
+        f"🎯 Тейк профіт: *{tp_fmt}* ({data['tp_pct']:+.2f}%)\n"
+        f"🛑 Стоп лос:    *{sl_fmt}* ({data['sl_pct']:+.2f}%)\n"
+        f"📊 Ризик/прибуток: 1:{ATR_TP_MULT/ATR_SL_MULT:.0f}\n"
+    )
 
     return (
-        f"📊 *{data['symbol']}* | {TIMEFRAME}\n"
-        f"🕐 {time_str}\n"
+        f"📊 *{data['symbol'].replace(':USDT', '')}* | {data['timeframe']}\n"
+        f"🕐 {data['timestamp'].strftime('%H:%M %d.%m.%Y')}\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"💰 Ціна: *{p}*\n"
+        f"💰 Ціна входу: *{price_fmt}*\n"
         f"📈 RSI ({RSI_PERIOD}): `{data['rsi']:.1f}`\n"
         f"━━━━━━━━━━━━━━━\n"
         f"Сигнал: *{data['signal']}*\n"
         f"Причини:\n{reasons_text}\n"
         f"{tp_sl_block}"
         f"━━━━━━━━━━━━━━━\n"
-        f"⚠️ _Це не фінансова порада. Торгуй самостійно._"
-    )
-
-
-def format_spike_message(data: dict) -> str:
-    p     = format_price(data["symbol"], data["price"])
-    p_ref = format_price(data["symbol"], data["price_4ago"] if data["spike_period"] == "1 год" else data["price_1ago"])
-    direction = "⬇️" if data["spike_change"] < 0 else "⬆️"
-    time_str = data["timestamp"].strftime("%H:%M %d.%m.%Y") if hasattr(data["timestamp"], "strftime") else str(data["timestamp"])
-
-    return (
-        f"⚡ *{data['symbol']}* — {data['spike_signal']}\n"
-        f"🕐 {time_str}\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"💰 Ціна зараз:  *{p}*\n"
-        f"💰 Була ({data['spike_period']} тому): *{p_ref}*\n"
-        f"{direction} Рух: *{data['spike_change']:+.3f}%* за {data['spike_period']}\n"
-        f"📈 RSI: `{data['rsi']:.1f}`\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"⚠️ _Можливий вплив новин. Аналізуй самостійно._"
+        f"⚠️ _Це не фінансова порада. Завжди аналізуй самостійно._"
     )
 
 
@@ -326,38 +231,29 @@ async def send_telegram(message: str) -> None:
     await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode="Markdown")
 
 
-# ============================================================
-# ГОЛОВНИЙ ЦИКЛ
-# ============================================================
-
 def scan_all() -> None:
+    global last_signal
     now = datetime.now().strftime("%H:%M:%S")
-    print(f"\n[{now}] Сканую {len(SYMBOLS)} пари...")
+    print(f"\n[{now}] Сканую {len(SYMBOLS)} монет...")
 
     signals_sent = 0
 
-    for symbol_name, ticker in SYMBOLS.items():
+    for symbol in SYMBOLS:
         try:
-            data = analyze(symbol_name, ticker)
-            print(f"  {symbol_name}: {data['price']:.4f} | RSI: {data['rsi']:.1f} | 15хв: {data['change_1c']:+.3f}% | 1год: {data['change_4c']:+.3f}% | {data['signal']}")
+            data = analyze(symbol, TIMEFRAME)
+            print(f"  {symbol}: ${data['price']:,.4f} | RSI: {data['rsi']:.1f} | {data['signal']}")
 
-            # RSI сигнал
-            if should_send(symbol_name, data["signal"], data["rsi"]):
-                asyncio.run(send_telegram(format_message(data)))
-                last_signal[symbol_name] = data["signal"]
-                print(f"  ✅ RSI сигнал: {data['signal']}")
+            if should_send(symbol, data["signal"], data["rsi"]):
+                message = format_message(data)
+                asyncio.run(send_telegram(message))
+                last_signal[symbol] = data["signal"]
+                print(f"  ✅ Сигнал надіслано: {data['signal']}")
                 signals_sent += 1
-
-            # Різкий рух
-            if data["spike_signal"] and should_send_spike(symbol_name, data["spike_signal"]):
-                asyncio.run(send_telegram(format_spike_message(data)))
-                print(f"  ⚡ {data['spike_signal']} за {data['spike_period']}: {data['spike_change']:+.3f}%")
-                signals_sent += 1
-            elif not data["spike_signal"]:
-                last_spike_signal[symbol_name] = None
+            elif data["signal"] != "НЕЙТРАЛЬНО":
+                print(f"  ⏭️  Пропущено (вже надсилався раніше)")
 
         except Exception as e:
-            print(f"  ❌ {symbol_name}: Помилка — {e}")
+            print(f"  ❌ {symbol}: Помилка — {e}")
 
     if signals_sent == 0:
         print(f"  — Нових сигналів немає")
@@ -365,11 +261,12 @@ def scan_all() -> None:
 
 def main():
     print("=" * 55)
-    print("🤖 Форекс сигнальний бот v4.2 запущено")
-    print(f"   Пари:         {', '.join(SYMBOLS.keys())}")
+    print("🤖 Крипто-сигнальний бот v3.0 запущено")
+    print(f"   Монети:       {', '.join(s.replace(':USDT','') for s in SYMBOLS)}")
     print(f"   Таймфрейм:    {TIMEFRAME}")
     print(f"   Перевірка:    кожні {CHECK_EVERY} хв")
-    print(f"   Різкий рух:   15хв >0.3%/0.5% | 1год >0.5%/1.0%")
+    print(f"   Сигнал КУПУЙ: RSI < {RSI_OVERSOLD} (скидання > {RSI_RESET_LOW})")
+    print(f"   Сигнал ПРОДАВАЙ: RSI > {RSI_OVERBOUGHT} (скидання < {RSI_RESET_HIGH})")
     print("=" * 55)
 
     scan_all()

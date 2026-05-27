@@ -25,8 +25,8 @@ from datetime import datetime
 # НАЛАШТУВАННЯ
 # ============================================================
 
-TELEGRAM_TOKEN = "ВАШ_ТОКЕН_ВІД_BOTFATHER"
-CHAT_ID        = "ВАШ_CHAT_ID"
+TELEGRAM_TOKEN = "В8886661285:AAF6p7w_BR4WIHo2oVrEhxi1pDqroXOilSA"
+CHAT_ID        = "-5103360859"
 
 SYMBOLS = {
     "EUR/USD": "EURUSD=X",

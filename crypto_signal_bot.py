@@ -33,11 +33,11 @@ TELEGRAM_TOKEN = "8886661285:AAF6p7w_BR4WIHo2oVrEhxi1pDqroXOilSA"
 CHAT_ID        = "-5103360859"
 
 SYMBOLS = [
-    "BTC/USDT",
-    "ETH/USDT",
-    "SOL/USDT",
-    "DOT/USDT",
-    "AVAX/USDT",
+    "BTC/USDT:USDT",
+    "ETH/USDT:USDT",
+    "SOL/USDT:USDT",
+    "DOT/USDT:USDT",
+    "AVAX/USDT:USDT",
 ]
 
 TIMEFRAME   = "1h"
